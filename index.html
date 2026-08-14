@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Mic Session Persistence PoC</title>
+<style>
+  :root{
+    --bg:#0b0d10; --panel:#14171c; --panel2:#181c22; --border:#262b33;
+    --text:#e6e8eb; --muted:#8b93a1; --amber:#ffb020; --green:#34d399; --red:#ff5c5c; --blue:#5b9dff;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html,body{ margin:0; padding:0; background:var(--bg); color:var(--text); }
+  body{
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    padding: env(safe-area-inset-top) 14px calc(env(safe-area-inset-bottom) + 14px);
+    max-width: 480px; margin: 0 auto;
+  }
+  .mono{ font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  header{ padding: 18px 2px 10px; }
+  h1{ font-size: 15px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 600; margin: 0 0 2px; }
+  .subtitle{ font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .panel{ background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+  .panel h2{ font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+  .status-row{ display:flex; align-items:center; gap:10px; margin-bottom: 12px; }
+  .pulse-dot{ width: 12px; height: 12px; border-radius: 50%; background: var(--border); flex-shrink:0; position: relative; }
+  .pulse-dot.on{ background: var(--green); }
+  .pulse-dot.rec{ background: var(--red); }
+  .pulse-dot.rec::after{ content:""; position:absolute; inset:-6px; border-radius:50%; border: 2px solid var(--red); opacity:0.6; animation: pulse 1.2s ease-out infinite; }
+  .pulse-dot.warn{ background: var(--amber); }
+  .pulse-dot.off{ background: var(--red); }
+  @keyframes pulse{ 0%{ transform: scale(0.6); opacity:0.8; } 100%{ transform: scale(1.8); opacity:0; } }
+  .status-text{ font-size: 14px; font-weight: 600; }
+  .status-sub{ font-size: 11px; color: var(--muted); margin-top:1px; }
+  .btn-row{ display:flex; gap:10px; flex-wrap: wrap; }
+  button{ flex:1; min-width: 120px; font-size: 14px; font-weight:600; border-radius:12px; border: 1px solid var(--border);
+    padding: 13px 10px; cursor:pointer; background: var(--panel2); color: var(--text); -webkit-appearance: none; appearance: none; }
+  button:active{ transform: scale(0.98); }
+  button:disabled{ opacity: 0.4; cursor: not-allowed; }
+  #armBtn{ background: var(--blue); color:#04101f; border-color: var(--blue); }
+  #startCaptureBtn{ background: var(--green); color:#04140d; border-color: var(--green); }
+  #stopCaptureBtn{ background: var(--red); color:#2b0505; border-color: var(--red); }
+  #rearmBtn{ background: var(--amber); color:#2b1a00; border-color: var(--amber); }
+  .kv{ display:grid; grid-template-columns: 1fr auto; gap: 6px 8px; font-size: 12px; }
+  .kv span:nth-child(odd){ color: var(--muted); }
+  .kv span:nth-child(even){ text-align:right; font-weight:600; }
+  .big-timer{ font-size: 22px; font-weight: 800; text-align:center; padding: 6px 0; }
+  audio{ width:100%; height: 32px; margin-top: 4px; }
+  .capture-row{ padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .capture-row:last-child{ border-bottom:none; }
+  .log{ max-height: 260px; overflow-y:auto; font-size: 10.5px; line-height: 1.6; background: var(--panel2);
+    border-radius: 10px; border: 1px solid var(--border); padding: 8px 10px; }
+  .log div{ border-bottom: 1px solid var(--border); padding: 3px 0; color: var(--muted); }
+  .log div:last-child{ border-bottom:none; }
+  .log .warn{ color: var(--amber); }
+  .log .err{ color: var(--red); }
+  .log .ok{ color: var(--green); }
+  .banner{ font-size: 11.5px; line-height:1.5; padding: 10px 12px; border-radius: 10px;
+    background: rgba(91,157,255,0.1); border: 1px solid rgba(91,157,255,0.35); color: var(--blue); margin-bottom: 12px; }
+  .banner.amber{ background: rgba(255,176,32,0.1); border-color: rgba(255,176,32,0.35); color: var(--amber); }
+  .banner.red{ background: rgba(255,92,92,0.12); border-color: rgba(255,92,92,0.4); color: var(--red); font-weight:700; }
+  .toggle-row{ display:flex; align-items:center; justify-content:space-between; font-size:13px; }
+  input[type=checkbox]{ width:20px; height:20px; }
+  .hidden{ display:none; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Mic Session Persistence PoC</h1>
+  <div class="subtitle">Solo getUserMedia + MediaRecorder. Studia se e come la sessione microfono resta viva tra registrazioni multiple, background/foreground, blocco schermo.</div>
+</header>
+
+<div class="banner" id="supportBanner">Verifico il supporto del browser…</div>
+
+<div class="banner red hidden" id="lostBanner">MICROPHONE SESSION LOST</div>
+<div class="banner amber hidden" id="userActionBanner">
+  USER ACTION REQUIRED — il browser richiede un nuovo gesto per riattivare il microfono.
+  <div class="btn-row" style="margin-top:8px;">
+    <button id="rearmBtn">REARM MICROPHONE</button>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Sessione microfono</h2>
+  <div class="status-row">
+    <div class="pulse-dot off" id="sessionDot"></div>
+    <div>
+      <div class="status-text" id="sessionText">Non armata</div>
+      <div class="status-sub" id="sessionSub">Premi ARM SESSION per aprire lo stream</div>
+    </div>
+  </div>
+  <div class="btn-row">
+    <button id="armBtn">ARM SESSION</button>
+  </div>
+  <div class="big-timer mono" id="sessionTimer">Session active for: —:—</div>
+  <div class="kv" style="margin-top:8px;">
+    <span>stream active</span><span id="kvStreamActive">—</span>
+    <span>track readyState</span><span id="kvReadyState">—</span>
+    <span>track enabled</span><span id="kvEnabled">—</span>
+    <span>track muted</span><span id="kvMuted">—</span>
+    <span>opened at</span><span id="kvOpenedAt">—</span>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Capture (riusa lo stesso stream)</h2>
+  <div class="status-row">
+    <div class="pulse-dot off" id="capDot"></div>
+    <div>
+      <div class="status-text" id="capText">Ferma</div>
+      <div class="status-sub" id="capSub">Arma la sessione prima di registrare</div>
+    </div>
+  </div>
+  <div class="btn-row">
+    <button id="startCaptureBtn" disabled>START CAPTURE</button>
+    <button id="stopCaptureBtn" disabled>STOP CAPTURE</button>
+  </div>
+  <div id="captureList" style="margin-top:10px;"></div>
+</div>
+
+<div class="panel">
+  <h2>Permesso microfono</h2>
+  <div class="kv">
+    <span>Permission API status</span><span id="kvPermApi">—</span>
+    <span>Real getUserMedia status</span><span id="kvPermReal">—</span>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Wake Lock (debug)</h2>
+  <div class="toggle-row">
+    <div>
+      Keep Screen Awake<br/><span class="status-sub" id="wakeLockSub">Verifico disponibilità…</span>
+    </div>
+    <input type="checkbox" id="wakeLockChk" disabled />
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Metriche finali</h2>
+  <div class="kv">
+    <span>Session duration</span><span id="mSessionDuration">—</span>
+    <span>Numero capture</span><span id="mCaptureCount">0</span>
+    <span>Numero recovery</span><span id="mRecoveryCount">0</span>
+    <span>Numero interruption</span><span id="mInterruptionCount">0</span>
+    <span>Ultimo errore</span><span id="mLastError">—</span>
+    <span>Stato corrente</span><span id="mCurrentState">non armata</span>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Log eventi</h2>
+  <div class="log" id="log"></div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  // ======================================================================
+  // Log
+  // ======================================================================
+  const logEl = document.getElementById('log');
+  const sessionStart = Date.now();
+  function log(text, level){
+    const line = document.createElement('div');
+    if (level) line.className = level;
+    const t = ((Date.now() - sessionStart) / 1000).toFixed(2);
+    line.textContent = '+' + t + 's  ' + text;
+    logEl.insertBefore(line, logEl.firstChild);
+    while (logEl.children.length > 400) logEl.removeChild(logEl.lastChild);
+  }
+
+  // ======================================================================
+  // UI refs
+  // ======================================================================
+  const supportBanner = document.getElementById('supportBanner');
+  const lostBanner = document.getElementById('lostBanner');
+  const userActionBanner = document.getElementById('userActionBanner');
+  const armBtn = document.getElementById('armBtn');
+  const rearmBtn = document.getElementById('rearmBtn');
+  const startCaptureBtn = document.getElementById('startCaptureBtn');
+  const stopCaptureBtn = document.getElementById('stopCaptureBtn');
+  const sessionDot = document.getElementById('sessionDot');
+  const sessionText = document.getElementById('sessionText');
+  const sessionSub = document.getElementById('sessionSub');
+  const sessionTimer = document.getElementById('sessionTimer');
+  const capDot = document.getElementById('capDot');
+  const capText = document.getElementById('capText');
+  const capSub = document.getElementById('capSub');
+  const captureList = document.getElementById('captureList');
+  const kvStreamActive = document.getElementById('kvStreamActive');
+  const kvReadyState = document.getElementById('kvReadyState');
+  const kvEnabled = document.getElementById('kvEnabled');
+  const kvMuted = document.getElementById('kvMuted');
+  const kvOpenedAt = document.getElementById('kvOpenedAt');
+  const kvPermApi = document.getElementById('kvPermApi');
+  const kvPermReal = document.getElementById('kvPermReal');
+  const wakeLockChk = document.getElementById('wakeLockChk');
+  const wakeLockSub = document.getElementById('wakeLockSub');
+  const mSessionDuration = document.getElementById('mSessionDuration');
+  const mCaptureCount = document.getElementById('mCaptureCount');
+  const mRecoveryCount = document.getElementById('mRecoveryCount');
+  const mInterruptionCount = document.getElementById('mInterruptionCount');
+  const mLastError = document.getElementById('mLastError');
+  const mCurrentState = document.getElementById('mCurrentState');
+
+  // ======================================================================
+  // Feature detection
+  // ======================================================================
+  const hasGetUserMedia = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+  const hasMediaRecorder = typeof window.MediaRecorder !== 'undefined';
+  const hasWakeLock = 'wakeLock' in navigator;
+  const isSecureContext = window.isSecureContext;
+
+  if (!isSecureContext || !hasGetUserMedia || !hasMediaRecorder) {
+    supportBanner.textContent = 'Contesto non idoneo: isSecureContext=' + isSecureContext + ', getUserMedia=' + hasGetUserMedia + ', MediaRecorder=' + hasMediaRecorder;
+    supportBanner.classList.add('amber');
+    armBtn.disabled = true;
+    log('Feature detection FALLITA', 'err');
+  } else {
+    supportBanner.textContent = 'getUserMedia e MediaRecorder disponibili. Wake Lock API: ' + (hasWakeLock ? 'disponibile' : 'non disponibile') + '.';
+    log('Feature detection OK — isSecureContext=' + isSecureContext + ', wakeLock=' + hasWakeLock);
+  }
+
+  wakeLockChk.disabled = !hasWakeLock;
+  wakeLockSub.textContent = hasWakeLock ? 'Disponibile — attiva per test' : 'Non disponibile in questo browser';
+
+  // ======================================================================
+  // Stato applicativo
+  // ======================================================================
+  let mediaStream = null;
+  let track = null;
+  let armedAt = null;
+  let sessionTimerInterval = null;
+  let pollInterval = null;
+
+  let mediaRecorder = null;
+  let currentChunks = [];
+  let captureStartAt = null;
+  let captureCount = 0;
+  let recoveryCount = 0;
+  let interruptionCount = 0;
+  let lastError = null;
+  let recoveryAttempted = false;   // singolo tentativo controllato per ogni evento di "lost"
+  let wakeLockSentinel = null;
+
+  function fmtMMSS(ms){
+    const totalSec = Math.floor(ms / 1000);
+    const mm = Math.floor(totalSec / 60).toString().padStart(2, '0');
+    const ss = (totalSec % 60).toString().padStart(2, '0');
+    return mm + ':' + ss;
+  }
+
+  function updateMetrics(){
+    mCaptureCount.textContent = captureCount;
+    mRecoveryCount.textContent = recoveryCount;
+    mInterruptionCount.textContent = interruptionCount;
+    mLastError.textContent = lastError || '—';
+    mSessionDuration.textContent = armedAt ? fmtMMSS(Date.now() - armedAt) : '—';
+    mCurrentState.textContent = describeCurrentState();
+  }
+
+  function describeCurrentState(){
+    if (!mediaStream) return 'non armata';
+    if (!mediaStream.active) return 'stream non attivo';
+    if (!track) return 'nessuna traccia';
+    return 'stream attivo, track ' + track.readyState + (track.muted ? ' (muted)' : '');
+  }
+
+  function refreshTrackReadout(){
+    kvStreamActive.textContent = mediaStream ? (mediaStream.active ? 'YES' : 'NO') : '—';
+    kvReadyState.textContent = track ? track.readyState : '—';
+    kvEnabled.textContent = track ? String(track.enabled) : '—';
+    kvMuted.textContent = track ? String(track.muted) : '—';
+    updateMetrics();
+  }
+
+  // ======================================================================
+  // Permessi: Permission API (best-effort) vs stato reale osservato
+  // ======================================================================
+  let realPermState = 'unknown'; // aggiornato solo da tentativi reali di getUserMedia
+
+  function setRealPermState(state){
+    realPermState = state;
+    kvPermReal.textContent = state;
+  }
+
+  if (navigator.permissions && navigator.permissions.query) {
+    navigator.permissions.query({ name: 'microphone' }).then((status) => {
+      kvPermApi.textContent = status.state;
+      log('Permission API status iniziale: ' + status.state);
+      status.onchange = () => {
+        kvPermApi.textContent = status.state;
+        log('Permission API status cambiato: ' + status.state, 'warn');
+      };
+    }).catch((e) => {
+      kvPermApi.textContent = 'non supportata';
+      log('Permission API non supporta "microphone" (' + e.message + ') — normale su Safari', 'warn');
+    });
+  } else {
+    kvPermApi.textContent = 'API assente';
+    log('Permissions API assente in questo browser', 'warn');
+  }
+
+  // ======================================================================
+  // Attach/detach listener sulla traccia
+  // ======================================================================
+  function attachTrackListeners(t){
+    t.onended = () => {
+      log('track ONENDED', 'warn');
+      interruptionCount++;
+      updateMetrics();
+      checkSessionLost('track ended');
+    };
+    t.onmute = () => {
+      log('track ONMUTE', 'warn');
+      refreshTrackReadout();
+    };
+    t.onunmute = () => {
+      log('track ONUNMUTE', 'ok');
+      refreshTrackReadout();
+    };
+  }
+
+  // ======================================================================
+  // ARM SESSION
+  // ======================================================================
+  async function armSession(isRearm){
+    log(isRearm ? 'REARM MICROPHONE premuto' : 'ARM SESSION premuto');
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      track = mediaStream.getAudioTracks()[0];
+      armedAt = Date.now();
+      attachTrackListeners(track);
+      setRealPermState('granted');
+      log('getUserMedia OK — settings: ' + JSON.stringify(track.getSettings ? track.getSettings() : {}), 'ok');
+
+      sessionDot.className = 'pulse-dot on';
+      sessionText.textContent = 'Armata';
+      sessionSub.textContent = 'Stream aperto, pronto per capture multiple';
+      kvOpenedAt.textContent = new Date(armedAt).toLocaleTimeString('it-IT');
+
+      startCaptureBtn.disabled = false;
+      armBtn.disabled = true;
+
+      hideLostUI();
+      recoveryAttempted = false;
+
+      startSessionTimer();
+      startPolling();
+      refreshTrackReadout();
+    } catch (err) {
+      lastError = err.name + ': ' + err.message;
+      setRealPermState('denied/failed (' + err.name + ')');
+      log('getUserMedia FALLITO — ' + lastError, 'err');
+      updateMetrics();
+      if (isRearm) {
+        showUserActionRequired();
+      }
+    }
+  }
+
+  function startSessionTimer(){
+    if (sessionTimerInterval) clearInterval(sessionTimerInterval);
+    sessionTimerInterval = setInterval(() => {
+      if (armedAt) {
+        sessionTimer.textContent = 'Session active for: ' + fmtMMSS(Date.now() - armedAt);
+      }
+      updateMetrics();
+    }, 1000);
+  }
+
+  function startPolling(){
+    if (pollInterval) clearInterval(pollInterval);
+    // Alcuni cambi di stato (readyState, muted) potrebbero non generare
+    // sempre un evento affidabile su ogni versione di Safari: un polling
+    // leggero ogni 2s serve a non perderli comunque nel log/UI.
+    pollInterval = setInterval(refreshTrackReadout, 2000);
+  }
+
+  armBtn.addEventListener('click', () => armSession(false));
+  rearmBtn.addEventListener('click', () => armSession(true));
+
+  // ======================================================================
+  // Capture (riusa lo stream già aperto)
+  // ======================================================================
+  function pickSupportedMimeType(){
+    const candidates = ['audio/mp4', 'audio/aac', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', ''];
+    for (const type of candidates) {
+      if (type === '' || (window.MediaRecorder.isTypeSupported && window.MediaRecorder.isTypeSupported(type))) {
+        return type;
+      }
+    }
+    return '';
+  }
+
+  startCaptureBtn.addEventListener('click', () => {
+    if (!mediaStream || !mediaStream.active) {
+      log('START CAPTURE premuto ma lo stream non è attivo', 'err');
+      checkSessionLost('capture attempt su stream non attivo');
+      return;
+    }
+    currentChunks = [];
+    const mimeType = pickSupportedMimeType();
+    try {
+      mediaRecorder = mimeType ? new MediaRecorder(mediaStream, { mimeType }) : new MediaRecorder(mediaStream);
+    } catch (err) {
+      log('new MediaRecorder() FALLITO — ' + err.name + ': ' + err.message, 'err');
+      lastError = err.name + ': ' + err.message;
+      updateMetrics();
+      return;
+    }
+
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) currentChunks.push(e.data);
+    };
+    mediaRecorder.onerror = (e) => {
+      log('MediaRecorder onerror: ' + (e.error ? e.error.name : 'sconosciuto'), 'err');
+    };
+    mediaRecorder.onstart = () => {
+      captureStartAt = Date.now();
+      capDot.className = 'pulse-dot rec';
+      capText.textContent = 'Capture in corso';
+      capSub.textContent = '#' + (captureCount + 1) + ' — nessuna nuova richiesta di permesso';
+      log('capture START (#' + (captureCount + 1) + '), mimeType=' + (mimeType || 'default'), 'ok');
+      startCaptureBtn.disabled = true;
+      stopCaptureBtn.disabled = false;
+    };
+    mediaRecorder.onstop = () => {
+      const durationMs = Date.now() - captureStartAt;
+      const blob = new Blob(currentChunks, { type: mimeType || 'audio/mp4' });
+      captureCount++;
+      log('capture STOP (#' + captureCount + ') — durata ' + (durationMs / 1000).toFixed(2) + 's, ' + blob.size + ' byte', 'ok');
+      addCaptureToList(captureCount, durationMs, blob);
+
+      capDot.className = 'pulse-dot off';
+      capText.textContent = 'Ferma';
+      capSub.textContent = 'Puoi avviare subito una nuova capture, stesso stream';
+      startCaptureBtn.disabled = false;
+      stopCaptureBtn.disabled = true;
+      updateMetrics();
+    };
+
+    try {
+      mediaRecorder.start();
+    } catch (err) {
+      log('mediaRecorder.start() FALLITO — ' + err.name + ': ' + err.message, 'err');
+    }
+  });
+
+  stopCaptureBtn.addEventListener('click', () => {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+      mediaRecorder.stop();
+      log('STOP CAPTURE premuto');
+    }
+  });
+
+  function addCaptureToList(index, durationMs, blob){
+    const url = URL.createObjectURL(blob);
+    const row = document.createElement('div');
+    row.className = 'capture-row';
+    row.innerHTML = '<div>#' + index + ' — ' + (durationMs / 1000).toFixed(2) + 's — ' + blob.size + ' byte</div>' +
+                     '<audio controls src="' + url + '"></audio>';
+    captureList.insertBefore(row, captureList.firstChild);
+  }
+
+  // ======================================================================
+  // Lifecycle: visibilitychange, pagehide/pageshow, freeze/resume
+  // ======================================================================
+  document.addEventListener('visibilitychange', () => {
+    log('visibilitychange → ' + document.visibilityState, 'warn');
+    if (document.visibilityState === 'visible') {
+      checkSessionLost('ritorno a foreground (visibilitychange)');
+      if (wakeLockChk.checked && hasWakeLock && !wakeLockSentinel) {
+        requestWakeLock(); // il sistema rilascia il wake lock quando la pagina va in background
+      }
+    }
+  });
+
+  window.addEventListener('pagehide', (e) => {
+    log('pagehide (persisted=' + e.persisted + ')', 'warn');
+  });
+
+  window.addEventListener('pageshow', (e) => {
+    log('pageshow (persisted=' + e.persisted + ')');
+    checkSessionLost('pageshow');
+  });
+
+  // Page Lifecycle API (freeze/resume): specifica principalmente Chromium.
+  // Attaccati comunque per completezza — se Safari non li emette mai, il
+  // log semplicemente non mostrerà queste righe, il che è già un dato utile.
+  document.addEventListener('freeze', () => {
+    log('freeze event ricevuto (Page Lifecycle API)', 'warn');
+  });
+  document.addEventListener('resume', () => {
+    log('resume event ricevuto (Page Lifecycle API)', 'ok');
+    checkSessionLost('resume event');
+  });
+
+  // ======================================================================
+  // Session lost detection + singolo tentativo di recovery controllato
+  // ======================================================================
+  function checkSessionLost(reason){
+    if (!mediaStream) return; // mai armata, nulla da perdere
+    const active = mediaStream.active && track && track.readyState === 'live';
+    refreshTrackReadout();
+    if (!active) {
+      log('Sessione persa — motivo: ' + reason, 'err');
+      interruptionCount++;
+      updateMetrics();
+      showLost();
+      attemptAutoRecovery();
+    }
+  }
+
+  function showLost(){
+    lostBanner.classList.remove('hidden');
+  }
+  function hideLostUI(){
+    lostBanner.classList.add('hidden');
+    userActionBanner.classList.add('hidden');
+  }
+  function showUserActionRequired(){
+    userActionBanner.classList.remove('hidden');
+  }
+
+  async function attemptAutoRecovery(){
+    if (recoveryAttempted) {
+      log('Recovery già tentato per questo evento di perdita, nessun nuovo tentativo automatico (evito loop)', 'warn');
+      return;
+    }
+    recoveryAttempted = true;
+    log('Tentativo controllato di recovery automatico (unico)…', 'warn');
+    try {
+      const newStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStream = newStream;
+      track = mediaStream.getAudioTracks()[0];
+      attachTrackListeners(track);
+      armedAt = armedAt || Date.now(); // mantiene il timer di sessione originale se già esisteva
+      recoveryCount++;
+      setRealPermState('granted');
+      log('Recovery riuscito senza nuovo gesto utente', 'ok');
+      hideLostUI();
+      startCaptureBtn.disabled = false;
+      refreshTrackReadout();
+    } catch (err) {
+      lastError = 'recovery fallito: ' + err.name + ': ' + err.message;
+      log('Recovery FALLITO — ' + lastError + ' — richiesto intervento manuale', 'err');
+      setRealPermState('richiede nuovo gesto (' + err.name + ')');
+      startCaptureBtn.disabled = true;
+      showUserActionRequired();
+      updateMetrics();
+    }
+  }
+
+  // ======================================================================
+  // Wake Lock
+  // ======================================================================
+  async function requestWakeLock(){
+    try {
+      wakeLockSentinel = await navigator.wakeLock.request('screen');
+      log('wake lock acquired', 'ok');
+      wakeLockSentinel.addEventListener('release', () => {
+        log('wake lock released', 'warn');
+        wakeLockSentinel = null;
+      });
+    } catch (err) {
+      log('wake lock FAILED — ' + err.name + ': ' + err.message, 'err');
+      wakeLockChk.checked = false;
+    }
+  }
+
+  wakeLockChk.addEventListener('change', () => {
+    if (wakeLockChk.checked) {
+      requestWakeLock();
+    } else if (wakeLockSentinel) {
+      wakeLockSentinel.release();
+    }
+  });
+
+  refreshTrackReadout();
+  updateMetrics();
+  log('PoC caricato. isSecureContext=' + isSecureContext + ', getUserMedia=' + hasGetUserMedia + ', MediaRecorder=' + hasMediaRecorder + ', wakeLock=' + hasWakeLock);
+})();
+</script>
+
+</body>
+</html>
