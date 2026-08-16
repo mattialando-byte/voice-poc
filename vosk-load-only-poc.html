@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Vosk Load-Only PoC — Safari iPhone</title>
+<style>
+  :root{
+    --bg:#0b0d10; --panel:#14171c; --panel2:#181c22; --border:#262b33;
+    --text:#e6e8eb; --muted:#8b93a1; --amber:#ffb020; --green:#34d399; --red:#ff5c5c; --blue:#5b9dff;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html,body{ margin:0; padding:0; background:var(--bg); color:var(--text); }
+  body{
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    padding: env(safe-area-inset-top) 14px calc(env(safe-area-inset-bottom) + 14px);
+    max-width: 480px; margin: 0 auto;
+  }
+  header{ padding: 18px 2px 10px; }
+  h1{ font-size: 15px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 600; margin: 0 0 2px; }
+  .subtitle{ font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .panel{ background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+  .panel h2{ font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+  button{ width:100%; font-size: 15px; font-weight:600; border-radius:12px; border: 1px solid var(--blue);
+    padding: 14px 10px; cursor:pointer; background: var(--blue); color:#04101f; -webkit-appearance: none; appearance: none; }
+  button:active{ transform: scale(0.98); }
+  button:disabled{ opacity: 0.5; cursor: not-allowed; }
+  .kv{ display:grid; grid-template-columns: 1fr auto; gap: 8px 8px; font-size: 13px; }
+  .kv span:nth-child(odd){ color: var(--muted); }
+  .kv span:nth-child(even){ text-align:right; font-weight:600; }
+  .progress-track{ height: 10px; background: var(--panel2); border-radius: 5px; overflow: hidden; margin-top: 10px; }
+  .progress-fill{ height: 100%; background: var(--blue); width: 0%; transition: width 0.2s; }
+  .log{ max-height: 280px; overflow-y:auto; font-size: 11px; line-height: 1.6; background: var(--panel2);
+    border-radius: 10px; border: 1px solid var(--border); padding: 8px 10px; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .log div{ border-bottom: 1px solid var(--border); padding: 3px 0; color: var(--muted); }
+  .log div:last-child{ border-bottom:none; }
+  .log .warn{ color: var(--amber); } .log .err{ color: var(--red); } .log .ok{ color: var(--green); }
+  .banner{ font-size: 11.5px; line-height:1.5; padding: 10px 12px; border-radius: 10px;
+    background: rgba(255,176,32,0.1); border: 1px solid rgba(255,176,32,0.35); color: var(--amber); margin-bottom: 12px; }
+  .status-badge{ font-size: 13px; font-weight: 700; padding: 8px; border-radius: 8px; text-align: center; margin-top: 8px; }
+  .status-idle{ background: var(--panel2); color: var(--muted); }
+  .status-loading{ background: rgba(91,157,255,0.15); color: var(--blue); }
+  .status-ok{ background: rgba(52,211,153,0.15); color: var(--green); }
+  .status-err{ background: rgba(255,92,92,0.15); color: var(--red); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Vosk Load-Only PoC</h1>
+  <div class="subtitle">Isola UNA sola domanda: Safari iPhone scarica e inizializza Vosk + modello italiano senza crash? Nessun microfono, nessuna capture, nessun trigger.</div>
+</header>
+
+<div class="banner">
+  Se questa pagina si ricarica da sola, si blocca, o Safari mostra un errore di memoria durante il test,
+  è ESATTAMENTE il dato che stiamo cercando — annota in che momento è successo (durante il download o durante l'inizializzazione).
+</div>
+
+<div class="panel">
+  <h2>Modello</h2>
+  <div class="kv">
+    <span>URL</span><span style="font-size:10px; word-break:break-all;">ccoreilly.github.io/.../vosk-model-small-it-0.4.tar.gz</span>
+    <span>Formato atteso</span><span>.tar.gz</span>
+    <span>Lingua</span><span>Italiano (it)</span>
+  </div>
+  <button id="loadBtn">LOAD MODEL</button>
+  <div class="status-badge status-idle" id="statusBadge">In attesa</div>
+  <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+  <div class="kv" style="margin-top:10px;">
+    <span>Dimensione scaricata</span><span id="downloadedSize">—</span>
+    <span>Tempo download</span><span id="downloadTime">—</span>
+    <span>Tempo inizializzazione Vosk</span><span id="initTime">—</span>
+    <span>Vosk/WASM inizializzato</span><span id="initStatus">no</span>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Log completo (incluso ogni errore)</h2>
+  <div class="log" id="log"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/vosk-browser@0.0.8/dist/vosk.js"></script>
+<script>
+(function(){
+  "use strict";
+
+  const MODEL_URL = "https://ccoreilly.github.io/vosk-browser/models/vosk-model-small-it-0.4.tar.gz";
+
+  const logEl = document.getElementById('log');
+  const sessionStart = Date.now();
+  function log(text, level){
+    const line = document.createElement('div');
+    if (level) line.className = level;
+    const t = ((Date.now() - sessionStart) / 1000).toFixed(2);
+    line.textContent = '+' + t + 's  ' + text;
+    logEl.insertBefore(line, logEl.firstChild);
+  }
+
+  const loadBtn = document.getElementById('loadBtn');
+  const statusBadge = document.getElementById('statusBadge');
+  const progressFill = document.getElementById('progressFill');
+  const downloadedSize = document.getElementById('downloadedSize');
+  const downloadTime = document.getElementById('downloadTime');
+  const initTime = document.getElementById('initTime');
+  const initStatus = document.getElementById('initStatus');
+
+  function setStatus(text, cls){
+    statusBadge.textContent = text;
+    statusBadge.className = "status-badge status-" + cls;
+  }
+
+  log("Pagina caricata. isSecureContext=" + window.isSecureContext);
+  if (!window.Vosk) {
+    log("ATTENZIONE: window.Vosk non definito — libreria non caricata dal CDN", "err");
+    setStatus("Libreria non caricata", "err");
+    loadBtn.disabled = true;
+  } else {
+    log("Libreria vosk-browser caricata correttamente dal CDN", "ok");
+  }
+
+  // Log esplicito per capire se la pagina si sta per ricaricare/scaricare
+  // memoria (utile per correlare un eventuale crash con questo evento).
+  window.addEventListener('pagehide', () => log("pagehide ricevuto", "warn"));
+  window.addEventListener('beforeunload', () => log("beforeunload ricevuto", "warn"));
+  document.addEventListener('visibilitychange', () => log("visibilitychange -> " + document.visibilityState, "warn"));
+
+  loadBtn.addEventListener('click', async () => {
+    loadBtn.disabled = true;
+    setStatus("Download in corso…", "loading");
+    log("LOAD MODEL premuto — URL: " + MODEL_URL);
+
+    const downloadStart = Date.now();
+    let blob;
+    try {
+      const response = await fetch(MODEL_URL);
+      log("fetch() risolto — HTTP " + response.status + " " + response.statusText);
+      if (!response.ok) {
+        throw new Error("HTTP " + response.status + " " + response.statusText);
+      }
+      const total = Number(response.headers.get('Content-Length')) || 0;
+      log("Content-Length dichiarato: " + (total ? (total / (1024*1024)).toFixed(1) + " MB" : "non fornito dal server"));
+
+      const reader = response.body.getReader();
+      const chunks = [];
+      let received = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.length;
+        downloadedSize.textContent = (received / (1024*1024)).toFixed(1) + " MB" + (total ? " / " + (total/(1024*1024)).toFixed(1) + " MB" : "");
+        if (total) progressFill.style.width = ((received/total)*100).toFixed(0) + "%";
+      }
+      blob = new Blob(chunks);
+      const downloadMs = Date.now() - downloadStart;
+      downloadTime.textContent = (downloadMs/1000).toFixed(1) + " s";
+      log("Download completato: " + (received/(1024*1024)).toFixed(1) + " MB in " + (downloadMs/1000).toFixed(1) + "s", "ok");
+    } catch (err) {
+      const isCorsLike = err.message === "Failed to fetch" || err.name === "TypeError";
+      log("DOWNLOAD FALLITO — " + err.name + ": " + err.message +
+          (isCorsLike ? " (possibile problema CORS o rete — controlla la Console Safari per il messaggio esatto)" : ""), "err");
+      setStatus("Download fallito", "err");
+      loadBtn.disabled = false;
+      return;
+    }
+
+    setStatus("Inizializzazione Vosk…", "loading");
+    const initStart = Date.now();
+    try {
+      const modelBlobUrl = URL.createObjectURL(blob);
+      log("Chiamata a Vosk.createModel()…");
+      const model = await window.Vosk.createModel(modelBlobUrl);
+      const initMs = Date.now() - initStart;
+      initTime.textContent = (initMs/1000).toFixed(1) + " s";
+      initStatus.textContent = "sì";
+      log("Vosk.createModel() risolto con successo in " + (initMs/1000).toFixed(1) + "s", "ok");
+      setStatus("Modello caricato e inizializzato", "ok");
+
+      // Nessun microfono, nessuna capture: ci fermiamo qui di proposito.
+      window.__voskModel = model; // solo per ispezione manuale da console se utile
+    } catch (err) {
+      initStatus.textContent = "no";
+      log("INIZIALIZZAZIONE FALLITA — " + err.name + ": " + err.message, "err");
+      setStatus("Inizializzazione fallita", "err");
+    } finally {
+      loadBtn.disabled = false;
+    }
+  });
+})();
+</script>
+
+</body>
+</html>
